@@ -1,4 +1,4 @@
-streamlit
 supabase
-pandas
 openpyxl
+weasyprint
+matplotlib
