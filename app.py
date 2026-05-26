@@ -372,7 +372,12 @@ elif menu == "Painel do Instrutor":
                     df_alunos_mat = pd.DataFrame(alunos_encontrados).sort_values(by="Nome do Aluno Ativo").reset_index(drop=True)
                     df_alunos_mat.index += 1
                     
-                    st.markdown(f"📊 **Total de alunos matriculados nesta matéria:** {len(df_alunos_mat)}")
-                    st.table(df_alunos_mat)
+                    st.write("")
+                    with st.container(border=True):
+                        st.markdown(f"📊 **Total de alunos matriculados nesta matéria:** `{len(df_alunos_mat)}`")
+                        st.write("")
+                        st.dataframe(df_alunos_mat, width='stretch', height=400)
                 else:
                     st.info("Nenhum aluno matriculado especificamente neste módulo ainda.")
+            else:
+                st.info("Cadastre módulos primeiro.")
