@@ -145,7 +145,9 @@ elif menu == "Painel do Instrutor":
                     } for item in res_relatorio.data]
                     
                     df_base = pd.DataFrame(dados_brutos)
-                    df_exibicao = df_base.pivot(index="Aluno", columns="Data", values="Status").fillna(0)
+                    
+                    # LINHA 148 ATUALIZADA: pivot_table com aggfunc='max' impede que duplicidades travem o sistema
+                    df_exibicao = df_base.pivot_table(index="Aluno", columns="Data", values="Status", aggfunc="max").fillna(0)
                     
                     res_total_mat = client.table("matriculas").select("id").eq("modulo_id", modulo_objeto['id']).execute()
                     total_matriculados = len(res_total_mat.data) if res_total_mat.data else len(df_exibicao.index)
