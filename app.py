@@ -145,8 +145,6 @@ elif menu == "Painel do Instrutor":
                     } for item in res_relatorio.data]
                     
                     df_base = pd.DataFrame(dados_brutos)
-                    
-                    # LINHA 148 ATUALIZADA: pivot_table com aggfunc='max' impede que duplicidades travem o sistema
                     df_exibicao = df_base.pivot_table(index="Aluno", columns="Data", values="Status", aggfunc="max").fillna(0)
                     
                     res_total_mat = client.table("matriculas").select("id").eq("modulo_id", modulo_objeto['id']).execute()
@@ -174,6 +172,22 @@ elif menu == "Painel do Instrutor":
                         ax.tick_params(axis='both', labelsize=8, colors='#5A6A85')
                         ax.grid(axis='y', linestyle='--', alpha=0.5)
                         st.pyplot(fig)
+                    
+                    # --- NOVA SEÇÃO: DETECTAR ALUNOS FALTANTES NO ÚLTIMO ENCONTRO ---
+                    if total_dias > 0:
+                        ultima_data_col = df_exibicao.columns[-1]
+                        serie_ultima_aula = df_exibicao[ultima_data_col]
+                        nomes_faltantes = serie_ultima_aula[serie_ultima_aula == 0].index.tolist()
+                        
+                        st.write("")
+                        with st.expander(f"🔍 Ver Alunos Faltantes no último encontro ({ultima_data_col})", expanded=False):
+                            if nomes_faltantes:
+                                st.markdown(f"🔴 **Total de Faltas:** `{len(nomes_faltantes)}` alunos")
+                                df_faltantes = pd.DataFrame({"Aluno Ausente": sorted(nomes_faltantes)})
+                                df_faltantes.index += 1
+                                st.dataframe(df_faltantes, width='stretch', height=250)
+                            else:
+                                st.success("🙌 Glória a Deus! 100% de presença no último encontro!")
                     
                     st.markdown("### Grade de Frequência Consolidada")
                     st.dataframe(df_visual, width='stretch')
