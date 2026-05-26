@@ -248,7 +248,7 @@ elif menu == "Painel do Instrutor":
                     </head>
                     <body>
                         <div class="header">
-                            <h2 style="margin:0; font-size:16pt;">CCM - DIÁRIO DE CLASSE PREMIUM (PDF)</h2>
+                            <h2 style="margin:0; font-size:16pt;">CCM - DIÁRIO DE CLASSE</h2>
                         </div>
                         <table class="meta-table">
                             <tr><td class="meta-label">MÓDULO:</td><td class="meta-val">{modulo_objeto['numero']} - {modulo_objeto['nome']}</td></tr>
@@ -291,7 +291,7 @@ elif menu == "Painel do Instrutor":
                         
                         st.write("")
                         st.download_button(
-                            label="📥 Baixar Diário de Presença Premium em PDF",
+                            label="📥 Baixar Diário de Presença",
                             data=pdf_data,
                             file_name=f"Diario_Premium_{codigo_mod_sel}.pdf",
                             mime="application/pdf",
