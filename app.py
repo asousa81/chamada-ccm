@@ -58,7 +58,7 @@ if menu == "Área do Aluno":
                 for idx, letra in enumerate(iniciais_existentes):
                     with cols_letras[idx]:
                         tipo_botao = "primary" if st.session_state.letra_selecionada == letra else "secondary"
-                        if st.button(letra, key=f"letra_{letra}", type=tipo_botao, use_container_width=True):
+                        if st.button(letra, key=f"letra_{letra}", type=tipo_botao, width='stretch'):
                             st.session_state.letra_selecionada = letra
                             st.rerun()
                 
@@ -71,7 +71,7 @@ if menu == "Área do Aluno":
                         alvo_col = col1 if idx % 3 == 0 else (col2 if idx % 3 == 1 else col3)
                         with alvo_col:
                             primeiro_nome = aluno['nome'].split()[0]
-                            if st.button(f"👤 {primeiro_nome}", help=aluno['nome'], use_container_width=True, key=f"btn_{aluno['id']}"):
+                            if st.button(f"👤 {primeiro_nome}", help=aluno['nome'], width='stretch', key=f"btn_{aluno['id']}"):
                                 try:
                                     client.table("presenca").insert({
                                         "aluno_id": int(aluno['id']), "data": dados_aula["data_encontro"], "status": "Presente",
@@ -89,7 +89,7 @@ if menu == "Área do Aluno":
                 irmao_selecionado = st.selectbox("Clique abaixo e comece a digitar seu nome:", options=nomes_alunos, index=None, placeholder="Digite seu nome aqui...")
                 
                 if irmao_selecionado:
-                    if st.button(f"Confirmar Presença para: {irmao_selecionado}", type="primary", use_container_width=True):
+                    if st.button(f"Confirmar Presença para: {irmao_selecionado}", type="primary", width='stretch'):
                         aluno_id = next(aluno['id'] for aluno in lista_alunos if aluno['nome'] == irmao_selecionado)
                         try:
                             client.table("presenca").insert({
@@ -127,7 +127,6 @@ elif menu == "Painel do Instrutor":
         tab1, tab2, tab3, tab4 = st.tabs(["📊 Relatório de Presenças", "🎮 Controle de Chamada", "📖 Cadastrar Módulos", "👥 Alunos e Matrículas"])
         res_modulos = client.table("modulos").select("*").order("ano", desc=True).order("numero").execute()
         
-        # --- TAB 1: VISUALIZAR RELATÓRIO EVOLUÍDO ---
         with tab1:
             st.subheader("📊 Diário de Classe - Visão Geral por Matéria")
             if res_modulos.data:
@@ -175,7 +174,7 @@ elif menu == "Painel do Instrutor":
                         st.pyplot(fig)
                     
                     st.markdown("### Grade de Frequência Consolidada")
-                    st.dataframe(df_visual, use_container_width=True)
+                    st.dataframe(df_visual, width='stretch')
                     
                     img_buf = io.BytesIO()
                     fig.savefig(img_buf, format='png', bbox_inches='tight', dpi=200)
@@ -267,7 +266,7 @@ elif menu == "Painel do Instrutor":
                             data=pdf_data,
                             file_name=f"Diario_Premium_{codigo_mod_sel}.pdf",
                             mime="application/pdf",
-                            use_container_width=True
+                            width='stretch'
                         )
                     except Exception as e:
                         st.error(f"Erro na geração do PDF: {e}")
@@ -276,7 +275,6 @@ elif menu == "Painel do Instrutor":
             else:
                 st.info("Cadastre matérias/módulos para começar a gerar relatórios.")
 
-        # --- TAB 2: CONTROLE DE CHAMADA ---
         with tab2:
             st.subheader("Gerenciar Encontro do Dia")
             status_atual = client.table("chamada_ativa").select("*, modulos(*)").eq("id", 1).execute()
@@ -317,7 +315,6 @@ elif menu == "Painel do Instrutor":
                         client.table("chamada_ativa").upsert({"id": 1, "data_encontro": data_aula.isoformat(), "aberta": True, "modulo_id": int(id_modulo_selecionado), "tipo_ux": ux_selecionada}).execute()
                         st.rerun()
 
-        # --- TAB 3: CADASTRO DE MÓDULOS ---
         with tab3:
             st.subheader("📖 Cadastrar Novo Módulo do CCM")
             with st.form("form_modulo"):
@@ -334,7 +331,6 @@ elif menu == "Painel do Instrutor":
                         except Exception:
                             st.error("Erro ou código duplicado.")
 
-        # --- TAB 4: ALUNOS E MATRÍCULAS ---
         with tab4:
             st.subheader("1. Base Geral: Cadastro Permanente de Alunos")
             nome_novo = st.text_input("Nome Completo")
@@ -362,7 +358,6 @@ elif menu == "Painel do Instrutor":
                     except Exception:
                         st.warning("Aluno já matriculado neste módulo.")
             
-            # --- TÓPICO 3: NOVO CONTROLE DE MATRICULADOS POR MATÉRIA (UX MELHORADA) ---
             st.write("---")
             st.subheader("3. Verificar Alunos Matriculados por Módulo")
             if res_modulos.data:
@@ -370,22 +365,14 @@ elif menu == "Painel do Instrutor":
                 mod_escolhido_ver = st.selectbox("Selecione o Módulo para ver os alunos ativos:", options=list(dict_ver_matriculas.keys()), key="sb_ver_mat")
                 id_mod_ver = dict_ver_matriculas[mod_escolhido_ver]
                 
-                # Faz o join exato para trazer apenas os alunos da matéria selecionada
                 res_lista_mat_filtrada = client.table("matriculas").select("alunos(nome)").eq("modulo_id", id_mod_ver).execute()
                 
                 if res_lista_mat_filtrada.data:
-                    alunos_encontrados = []
-                    for m in res_lista_mat_filtrada.data:
-                        if m["alunos"]:
-                            alunos_encontrados.append({"Nome do Aluno Ativo": m["alunos"]["nome"]})
-                    
+                    alunos_encontrados = [{"Nome do Aluno Ativo": m["alunos"]["nome"]} for m in res_lista_mat_filtrada.data if m["alunos"]]
                     df_alunos_mat = pd.DataFrame(alunos_encontrados).sort_values(by="Nome do Aluno Ativo").reset_index(drop=True)
-                    # Adiciona índice começando em 1 para servir de contagem visual de chamadas
                     df_alunos_mat.index += 1
                     
                     st.markdown(f"📊 **Total de alunos matriculados nesta matéria:** {len(df_alunos_mat)}")
                     st.table(df_alunos_mat)
                 else:
                     st.info("Nenhum aluno matriculado especificamente neste módulo ainda.")
-            else:
-                st.info("Cadastre módulos primeiro.")
