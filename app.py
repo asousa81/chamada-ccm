@@ -134,22 +134,36 @@ elif menu == "Painel do Instrutor":
                 mod_escolhido_txt = st.selectbox("Filtrar Relatório por Matéria:", options=list(dict_filtro_mod.keys()))
                 modulo_objeto = dict_filtro_mod[mod_escolhido_txt]
                 codigo_mod_sel = modulo_objeto['numero']
+                id_modulo_sel = modulo_objeto['id']
                 
+                # 1. Busca a lista oficial de TODOS os alunos matriculados nesta matéria
+                res_total_mat = client.table("matriculas").select("alunos(nome)").eq("modulo_id", id_modulo_sel).execute()
+                lista_todos_matriculados = sorted([m["alunos"]["nome"] for m in res_total_mat.data if m["alunos"]]) if res_total_mat.data else []
+                total_matriculados = len(lista_todos_matriculados)
+                if total_matriculados == 0: total_matriculados = 1
+                
+                # 2. Busca o histórico de presenças registradas
                 res_relatorio = client.table("presenca").select("data, status, alunos(nome)").eq("modulo_numero", codigo_mod_sel).execute()
                 
-                if res_relatorio.data:
-                    dados_brutos = [{
-                        "Data": pd.to_datetime(item["data"]).strftime('%d/%m/%Y'),
-                        "Aluno": item["alunos"]["nome"] if item["alunos"] else "N/A",
-                        "Status": 1
-                    } for item in res_relatorio.data]
+                if res_relatorio.data and lista_todos_matriculados:
+                    # Encontra todas as datas únicas que já tiveram chamada nessa matéria
+                    datas_com_chamada = sorted(list(set([pd.to_datetime(item["data"]).strftime('%d/%m/%Y') for item in res_relatorio.data])))
                     
-                    df_base = pd.DataFrame(dados_brutos)
+                    # Cria um conjunto rápido de cruzamento (Aluno, Data) para identificar presenças legítimas
+                    presencas_confirmadas = set(
+                        (item["alunos"]["nome"], pd.to_datetime(item["data"]).strftime('%d/%m/%Y'))
+                        for item in res_relatorio.data if item["alunos"]
+                    )
+                    
+                    # 3. Monta a matriz garantindo que TODOS os matriculados apareçam em TODAS as datas
+                    dados_grade = []
+                    for aluno in lista_todos_matriculados:
+                        for d_chamada in datas_com_chamada:
+                            status_presenca = 1 if (aluno, d_chamada) in presencas_confirmadas else 0
+                            dados_grade.append({"Aluno": aluno, "Data": d_chamada, "Status": status_presenca})
+                    
+                    df_base = pd.DataFrame(dados_grade)
                     df_exibicao = df_base.pivot_table(index="Aluno", columns="Data", values="Status", aggfunc="max").fillna(0)
-                    
-                    res_total_mat = client.table("matriculas").select("id").eq("modulo_id", modulo_objeto['id']).execute()
-                    total_matriculados = len(res_total_mat.data) if res_total_mat.data else len(df_exibicao.index)
-                    if total_matriculados == 0: total_matriculados = 1
                     
                     total_dias = len(df_exibicao.columns)
                     participacao_alunos = (df_exibicao.sum(axis=1) / total_dias) * 100
@@ -173,7 +187,6 @@ elif menu == "Painel do Instrutor":
                         ax.grid(axis='y', linestyle='--', alpha=0.5)
                         st.pyplot(fig)
                     
-                    # --- NOVA SEÇÃO: DETECTAR ALUNOS FALTANTES NO ÚLTIMO ENCONTRO ---
                     if total_dias > 0:
                         ultima_data_col = df_exibicao.columns[-1]
                         serie_ultima_aula = df_exibicao[ultima_data_col]
@@ -287,7 +300,7 @@ elif menu == "Painel do Instrutor":
                     except Exception as e:
                         st.error(f"Erro na geração do PDF: {e}")
                 else:
-                    st.info(f"Nenhum registro de presença para o módulo {codigo_mod_sel}.")
+                    st.info(f"Nenhum registro completo ou alunos matriculados encontrados para o módulo {codigo_mod_sel}.")
             else:
                 st.info("Cadastre matérias/módulos para começar a gerar relatórios.")
 
