@@ -380,7 +380,9 @@ elif menu == "Painel do Instrutor":
                 if total_matriculados == 0: total_matriculados = 1
                 
                 # 2. Busca o histórico de presenças registradas
-                res_relatorio = client.table("presenca").select("data, status, alunos(nome)").eq("modulo_numero", codigo_mod_sel).execute()
+                res_relatorio = client.table("presenca").select("data, status, alunos(nome)").eq(
+                    "modulo_numero", codigo_mod_sel
+                ).eq("ano", modulo_objeto["ano"]).execute()
                 
                 if res_relatorio.data and lista_todos_matriculados:
                     # Encontra todas as datas únicas que já tiveram chamada nessa matéria
@@ -582,17 +584,42 @@ elif menu == "Painel do Instrutor":
                         st.rerun()
 
         with tab3:
-            st.subheader("📖 Cadastrar Novo Módulo do CCM")
-            with st.form("form_modulo"):
-                ano_mod = st.number_input("Ano Letivo", min_value=2020, max_value=2100, value=date.today().year)
-                code_mod = st.text_input("Código do Módulo [MDAA##]")
-                nome_mod = st.text_input("Nome do Módulo / Matéria")
-                prof_mod = st.text_input("Nome do Professor(a)")
-                if st.form_submit_button("Salvar Módulo"):
-                    if code_mod and nome_mod and prof_mod:
+            st.subheader("📖 Módulos do CCM")
+
+            if st.session_state.get("flash_modulos"):
+                st.success(st.session_state.pop("flash_modulos"))
+
+            modulos_lista = res_modulos.data or []
+            chaves_modulos = {
+                (str(m["numero"]).strip().upper(), int(m["ano"])): m["id"] for m in modulos_lista
+            }
+
+            aba_novo_mod, aba_gerir_mod = st.tabs(["➕ Cadastrar", "✏️ Gerenciar"])
+
+            with aba_novo_mod:
+                with st.form("form_modulo", clear_on_submit=True):
+                    ano_mod = st.number_input("Ano Letivo", min_value=2020, max_value=2100, value=date.today().year)
+                    code_mod = st.text_input("Código do Módulo [MDAA##]")
+                    nome_mod = st.text_input("Nome do Módulo / Matéria")
+                    prof_mod = st.text_input("Nome do Professor(a)")
+                    criar_modulo = st.form_submit_button("Salvar Módulo", type="primary")
+
+                if criar_modulo:
+                    codigo_limpo = normalizar(code_mod).upper()
+                    nome_limpo_mod = normalizar(nome_mod)
+                    prof_limpo = normalizar(prof_mod)
+
+                    if not (codigo_limpo and nome_limpo_mod and prof_limpo):
+                        st.warning("Preencha código, nome e professor.")
+                    elif (codigo_limpo, int(ano_mod)) in chaves_modulos:
+                        st.error(f"Já existe o módulo {codigo_limpo} no ano letivo {int(ano_mod)}.")
+                    else:
                         try:
-                            client.table("modulos").insert({"ano": int(ano_mod), "numero": code_mod.strip().upper(), "nome": nome_mod.strip(), "professor": prof_mod.strip()}).execute()
-                            st.success("Módulo cadastrado!")
+                            client.table("modulos").insert({
+                                "ano": int(ano_mod), "numero": codigo_limpo,
+                                "nome": nome_limpo_mod, "professor": prof_limpo,
+                            }).execute()
+                            st.session_state["flash_modulos"] = f"✅ Módulo {codigo_limpo} cadastrado."
                             st.rerun()
                         except APIError as erro:
                             if duplicado(erro):
@@ -601,6 +628,152 @@ elif menu == "Painel do Instrutor":
                                 st.error(f"Não foi possível cadastrar: {erro.message}")
                         except ERROS_CONEXAO:
                             avisar_conexao("cadastrar o módulo")
+
+            with aba_gerir_mod:
+                if not modulos_lista:
+                    st.info("Nenhum módulo cadastrado ainda.")
+                else:
+                    try:
+                        vinculos_mod = client.table("matriculas").select("modulo_id").execute().data or []
+                        presencas_mod = client.table("presenca").select("modulo_numero, ano").execute().data or []
+                        chamada_para_travar = client.table("chamada_ativa").select("modulo_id, aberta").eq("id", 1).execute().data or []
+                    except APIError as erro:
+                        st.error(f"Não foi possível carregar os vínculos: {erro.message}")
+                        st.stop()
+                    except ERROS_CONEXAO:
+                        avisar_conexao("carregar os vínculos dos módulos")
+                        st.stop()
+
+                    qtd_matriculas_mod = Counter(v["modulo_id"] for v in vinculos_mod)
+                    qtd_presencas_mod = Counter(
+                        (str(p["modulo_numero"]).strip().upper(), int(p["ano"]))
+                        for p in presencas_mod if p.get("modulo_numero") and p.get("ano") is not None
+                    )
+                    modulo_em_chamada = (
+                        chamada_para_travar[0].get("modulo_id")
+                        if chamada_para_travar and chamada_para_travar[0].get("aberta") else None
+                    )
+
+                    rotulo_modulos = {
+                        f"{m['ano']} · Mód {m['numero']} - {m['nome']}": m for m in modulos_lista
+                    }
+                    escolha_mod = st.selectbox(
+                        "Selecione o módulo",
+                        options=list(rotulo_modulos.keys()),
+                        index=None,
+                        placeholder="Digite para buscar...",
+                        key="sel_gerir_modulo",
+                    )
+
+                    if escolha_mod:
+                        mod_alvo = rotulo_modulos[escolha_mod]
+                        codigo_atual = str(mod_alvo["numero"]).strip().upper()
+                        ano_atual = int(mod_alvo["ano"])
+                        n_mat_mod = qtd_matriculas_mod.get(mod_alvo["id"], 0)
+                        n_pres_mod = qtd_presencas_mod.get((codigo_atual, ano_atual), 0)
+
+                        with st.container(border=True):
+                            st.markdown(f"**Mód {mod_alvo['numero']} — {mod_alvo['nome']}**")
+                            st.caption(
+                                f"Ano {ano_atual} · Professor(a): {mod_alvo['professor']} · "
+                                f"{n_mat_mod} matriculado(s) · {n_pres_mod} presença(s) no histórico"
+                            )
+
+                        st.markdown("**Corrigir dados**")
+                        chave_edicao = f"{mod_alvo['id']}"
+                        novo_ano_mod = st.number_input(
+                            "Ano Letivo", min_value=2020, max_value=2100, value=ano_atual,
+                            key=f"edit_ano_{chave_edicao}",
+                        )
+                        novo_codigo_mod = st.text_input(
+                            "Código do Módulo", value=mod_alvo["numero"], key=f"edit_cod_{chave_edicao}"
+                        )
+                        novo_nome_mod = st.text_input(
+                            "Nome do Módulo / Matéria", value=mod_alvo["nome"], key=f"edit_nome_{chave_edicao}"
+                        )
+                        novo_prof_mod = st.text_input(
+                            "Nome do Professor(a)", value=mod_alvo["professor"], key=f"edit_prof_{chave_edicao}"
+                        )
+
+                        codigo_editado = normalizar(novo_codigo_mod).upper()
+                        ano_editado = int(novo_ano_mod)
+                        muda_identidade = (codigo_editado, ano_editado) != (codigo_atual, ano_atual)
+
+                        if muda_identidade and n_pres_mod:
+                            st.warning(
+                                "Alterar código ou ano muda a identidade do módulo. As presenças já "
+                                "registradas apontam para o código antigo e serão atualizadas junto, "
+                                "senão o histórico ficaria órfão no relatório."
+                            )
+
+                        propagar = st.checkbox(
+                            "Aplicar a correção também ao histórico de presenças",
+                            value=True,
+                            disabled=muda_identidade,
+                            help="Obrigatório quando o código ou o ano mudam.",
+                            key=f"edit_prop_{chave_edicao}",
+                        ) or muda_identidade
+
+                        if st.button("Salvar alterações", type="primary", key=f"btn_edit_mod_{chave_edicao}"):
+                            nome_editado = normalizar(novo_nome_mod)
+                            prof_editado = normalizar(novo_prof_mod)
+                            conflito = chaves_modulos.get((codigo_editado, ano_editado))
+
+                            if not (codigo_editado and nome_editado and prof_editado):
+                                st.warning("Código, nome e professor não podem ficar vazios.")
+                            elif conflito and conflito != mod_alvo["id"]:
+                                st.error(f"Já existe outro módulo {codigo_editado} no ano {ano_editado}.")
+                            else:
+                                try:
+                                    client.table("modulos").update({
+                                        "ano": ano_editado, "numero": codigo_editado,
+                                        "nome": nome_editado, "professor": prof_editado,
+                                    }).eq("id", int(mod_alvo["id"])).execute()
+
+                                    if propagar and n_pres_mod:
+                                        client.table("presenca").update({
+                                            "modulo_numero": codigo_editado, "modulo_nome": nome_editado,
+                                            "professor": prof_editado, "ano": ano_editado,
+                                        }).eq("modulo_numero", codigo_atual).eq("ano", ano_atual).execute()
+
+                                    st.session_state["flash_modulos"] = f"✅ Módulo {codigo_editado} atualizado."
+                                    st.rerun()
+                                except APIError as erro:
+                                    st.error(f"Não foi possível atualizar: {erro.message}")
+                                except ERROS_CONEXAO:
+                                    avisar_conexao("atualizar o módulo")
+
+                        st.write("---")
+                        st.markdown("**Excluir módulo**")
+                        if modulo_em_chamada == mod_alvo["id"]:
+                            st.info("Exclusão bloqueada: este é o módulo da chamada aberta agora. Feche a chamada antes.")
+                        elif n_pres_mod:
+                            st.info(
+                                f"Exclusão bloqueada: há {n_pres_mod} presença(s) registrada(s) neste módulo. "
+                                "Apagar o módulo deixaria o histórico sem referência."
+                            )
+                        elif n_mat_mod:
+                            st.warning(
+                                f"Exclusão bloqueada: há {n_mat_mod} aluno(s) matriculado(s). "
+                                "Remova as matrículas na aba 👥 Alunos e Matrículas."
+                            )
+                        else:
+                            confirma_mod = st.checkbox(
+                                f"Confirmo a exclusão do módulo {mod_alvo['numero']}",
+                                key=f"chk_exclui_mod_{chave_edicao}",
+                            )
+                            if st.button(
+                                "🗑️ Excluir módulo", type="primary",
+                                disabled=not confirma_mod, key=f"btn_exclui_mod_{chave_edicao}",
+                            ):
+                                try:
+                                    client.table("modulos").delete().eq("id", int(mod_alvo["id"])).execute()
+                                    st.session_state["flash_modulos"] = f"🗑️ Módulo {mod_alvo['numero']} removido."
+                                    st.rerun()
+                                except APIError as erro:
+                                    st.error(f"Não foi possível remover: {erro.message}")
+                                except ERROS_CONEXAO:
+                                    avisar_conexao("remover o módulo")
 
         with tab4:
             try:
