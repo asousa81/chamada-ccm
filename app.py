@@ -58,6 +58,31 @@ def normalizar(texto: str) -> str:
     return " ".join(str(texto).split())
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def tem_coluna_origem() -> bool:
+    """A coluna `origem` é opcional: o app funciona antes e depois da migração."""
+    try:
+        client.table("presenca").select("origem").limit(1).execute()
+        return True
+    except APIError:
+        return False
+
+
+def montar_presenca(aluno_id, data_encontro, modulo: dict, origem: str) -> dict:
+    registro = {
+        "aluno_id": int(aluno_id),
+        "data": data_encontro,
+        "status": "Presente",
+        "ano": modulo["ano"],
+        "modulo_numero": str(modulo["numero"]),
+        "modulo_nome": modulo["nome"],
+        "professor": modulo["professor"],
+    }
+    if tem_coluna_origem():
+        registro["origem"] = origem
+    return registro
+
+
 def cadastrar_aluno(nome: str) -> None:
     try:
         client.table("alunos").insert({"nome": nome}).execute()
@@ -187,11 +212,9 @@ if menu == "Área do Aluno":
                             primeiro_nome = aluno['nome'].split()[0]
                             if st.button(f"👤 {primeiro_nome}", help=aluno['nome'], width='stretch', key=f"btn_{aluno['id']}"):
                                 try:
-                                    client.table("presenca").insert({
-                                        "aluno_id": int(aluno['id']), "data": dados_aula["data_encontro"], "status": "Presente",
-                                        "ano": dados_modulo["ano"], "modulo_numero": str(dados_modulo["numero"]),
-                                        "modulo_nome": dados_modulo["nome"], "professor": dados_modulo["professor"]
-                                    }).execute()
+                                    client.table("presenca").insert(
+                                        montar_presenca(aluno['id'], dados_aula["data_encontro"], dados_modulo, "aluno")
+                                    ).execute()
                                     st.success(f"✅ Registrado: {primeiro_nome}!")
                                 except APIError as erro:
                                     if duplicado(erro):
@@ -211,11 +234,9 @@ if menu == "Área do Aluno":
                     if st.button(f"Confirmar Presença para: {irmao_selecionado}", type="primary", width='stretch'):
                         aluno_id = next(aluno['id'] for aluno in lista_alunos if aluno['nome'] == irmao_selecionado)
                         try:
-                            client.table("presenca").insert({
-                                "aluno_id": int(aluno_id), "data": dados_aula["data_encontro"], "status": "Presente",
-                                "ano": dados_modulo["ano"], "modulo_numero": str(dados_modulo["numero"]),
-                                "modulo_nome": dados_modulo["nome"], "professor": dados_modulo["professor"]
-                            }).execute()
+                            client.table("presenca").insert(
+                                montar_presenca(aluno_id, dados_aula["data_encontro"], dados_modulo, "aluno")
+                            ).execute()
                             st.success(f"✅ Sucesso! Presença registrada para {irmao_selecionado}.")
                             st.balloons()
                         except APIError as erro:
@@ -252,8 +273,96 @@ elif menu == "Painel do Instrutor":
             st.session_state.instrutor_autenticado = False
             st.rerun()
             
-        tab1, tab2, tab3, tab4 = st.tabs(["📊 Relatório de Presenças", "🎮 Controle de Chamada", "📖 Cadastrar Módulos", "👥 Alunos e Matrículas"])
+        tab_live, tab1, tab2, tab3, tab4 = st.tabs(["🙋 Chamada ao Vivo", "📊 Relatório de Presenças", "🎮 Controle de Chamada", "📖 Cadastrar Módulos", "👥 Alunos e Matrículas"])
         res_modulos = client.table("modulos").select("*").order("ano", desc=True).order("numero").execute()
+
+        with tab_live:
+            st.subheader("🙋 Chamada ao Vivo")
+            st.caption(
+                "Para o instrutor conduzir a chamada no próprio aparelho: toque no nome para "
+                "marcar presença, toque de novo para desmarcar."
+            )
+
+            try:
+                chamada_atual = client.table("chamada_ativa").select("*, modulos(*)").eq("id", 1).execute().data
+            except ERROS_CONEXAO:
+                avisar_conexao("carregar a chamada")
+                st.stop()
+
+            dados_chamada = chamada_atual[0] if chamada_atual else {}
+            modulo_ao_vivo = dados_chamada.get("modulos")
+
+            if not dados_chamada.get("aberta") or not modulo_ao_vivo:
+                st.info("Nenhuma chamada aberta no momento. Abra na aba **🎮 Controle de Chamada**.")
+            else:
+                data_encontro = dados_chamada["data_encontro"]
+                st.markdown(
+                    f"**Mód {modulo_ao_vivo['numero']} — {modulo_ao_vivo['nome']}** · "
+                    f"{pd.to_datetime(data_encontro).strftime('%d/%m/%Y')}"
+                )
+
+                try:
+                    matriculados_ao_vivo = client.table("matriculas").select("alunos(id, nome)").eq(
+                        "modulo_id", dados_chamada["modulo_id"]
+                    ).execute().data or []
+                    colunas_presenca = "id, aluno_id" + (", origem" if tem_coluna_origem() else "")
+                    ja_registrados = client.table("presenca").select(colunas_presenca).eq(
+                        "data", data_encontro
+                    ).eq("modulo_numero", str(modulo_ao_vivo["numero"])).execute().data or []
+                except APIError as erro:
+                    st.error(f"Não foi possível carregar a chamada: {erro.message}")
+                    st.stop()
+                except ERROS_CONEXAO:
+                    avisar_conexao("carregar a lista da turma")
+                    st.stop()
+
+                turma = sorted(
+                    (m["alunos"] for m in matriculados_ao_vivo if m["alunos"]),
+                    key=lambda a: a["nome"],
+                )
+                registro_por_aluno = {r["aluno_id"]: r for r in ja_registrados}
+
+                if not turma:
+                    st.warning("Nenhum aluno matriculado neste módulo.")
+                else:
+                    total_presentes = sum(1 for a in turma if a["id"] in registro_por_aluno)
+                    st.progress(
+                        total_presentes / len(turma),
+                        text=f"{total_presentes} de {len(turma)} presentes",
+                    )
+
+                    filtro_ao_vivo = normalizar(st.text_input(
+                        "🔎 Filtrar", placeholder="Digite parte do nome...", key="filtro_ao_vivo"
+                    )).lower()
+                    visiveis = [a for a in turma if filtro_ao_vivo in a["nome"].lower()] if filtro_ao_vivo else turma
+
+                    col_esq, col_dir = st.columns(2)
+                    for indice, aluno_live in enumerate(visiveis):
+                        registro_live = registro_por_aluno.get(aluno_live["id"])
+                        marcado = registro_live is not None
+                        origem_registro = (registro_live or {}).get("origem", "aluno")
+                        icone = ("✅" if origem_registro == "aluno" else "👤") if marcado else "⬜"
+
+                        with (col_esq if indice % 2 == 0 else col_dir):
+                            if st.button(
+                                f"{icone} {aluno_live['nome']}",
+                                key=f"live_{aluno_live['id']}",
+                                width='stretch',
+                            ):
+                                try:
+                                    if marcado:
+                                        client.table("presenca").delete().eq("id", registro_live["id"]).execute()
+                                    else:
+                                        client.table("presenca").insert(
+                                            montar_presenca(aluno_live["id"], data_encontro, modulo_ao_vivo, "instrutor")
+                                        ).execute()
+                                    st.rerun()
+                                except APIError as erro:
+                                    st.error(f"Não foi possível atualizar: {erro.message}")
+                                except ERROS_CONEXAO:
+                                    avisar_conexao("atualizar a presença")
+
+                    st.caption("✅ registrado pelo próprio aluno · 👤 marcado pelo instrutor · ⬜ ausente")
         
         with tab1:
             st.subheader("📊 Diário de Classe - Visão Geral por Matéria")
