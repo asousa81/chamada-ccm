@@ -4,20 +4,111 @@ from datetime import date
 from supabase import create_client, Client
 import io
 import base64
+import hmac
+import httpx
 import matplotlib.pyplot as plt
+from postgrest.exceptions import APIError
 
 st.set_page_config(page_title="Presença CCM", layout="centered")
 
-@st.cache_resource
+# Erros de rede (host que não resolve, timeout, conexão derrubada).
+# Precisam ser tratados separadamente dos erros de banco: o Supabase só é
+# acessado de fato na primeira consulta, nunca no create_client().
+ERROS_CONEXAO = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.ReadTimeout,
+    httpx.RemoteProtocolError,
+)
+
+
+class CredenciaisAusentes(Exception):
+    """Secrets do Supabase não configurados no ambiente."""
+
+
+def _config_supabase() -> dict:
+    return dict(st.secrets.get("connections", {}).get("supabase", {}))
+
+
+def _url_mascarada() -> str:
+    """Mostra a URL sem revelar o ref completo do projeto — a tela de erro é pública."""
+    url = str(_config_supabase().get("url", "")).strip()
+    if not url:
+        return "(não informada)"
+    ref = url.replace("https://", "").split(".")[0]
+    return url.replace(ref, ref[:4] + "…" + ref[-2:]) if len(ref) > 8 else url
+
+
+def duplicado(erro: APIError) -> bool:
+    """True quando o Postgres recusou o insert por violação de chave única."""
+    return getattr(erro, "code", None) == "23505" or "duplicate key" in (erro.message or "").lower()
+
+
+def avisar_conexao(contexto: str = "") -> None:
+    st.error(
+        f"🔌 Sem conexão com o banco de dados{(' ao ' + contexto) if contexto else ''}. "
+        "Tente novamente em instantes; se persistir, avise o responsável pelo app."
+    )
+
+
+@st.cache_resource(show_spinner="Conectando ao banco de dados...")
 def init_supabase() -> Client:
-    url = st.secrets["connections"]["supabase"]["url"]
-    key = st.secrets["connections"]["supabase"]["key"]
-    return create_client(url, key)
+    conf = _config_supabase()
+    url = str(conf.get("url", "")).strip().rstrip("/")
+    key = str(conf.get("key", "")).strip()
+
+    if not url or not key:
+        raise CredenciaisAusentes()
+
+    cliente = create_client(url, key)
+    # Consulta de sanidade: create_client() não abre conexão nenhuma, então sem
+    # este ping o app só descobriria a falha lá na frente, com stack trace na tela.
+    cliente.table("chamada_ativa").select("id").limit(1).execute()
+    return cliente
+
 
 try:
     client = init_supabase()
-except Exception as e:
-    st.error("Erro ao conectar ao Supabase. Verifique seu arquivo secrets.toml.")
+except CredenciaisAusentes:
+    st.error("⚙️ Credenciais do Supabase não configuradas.")
+    st.caption(
+        "Em Settings → Secrets do app, informe a seção `[connections.supabase]` "
+        "com as chaves `url` e `key`."
+    )
+    st.stop()
+except ERROS_CONEXAO:
+    st.error("🔌 O app está fora do ar no momento — o banco de dados não respondeu.")
+    st.info("Se você é aluno, avise o instrutor. A chamada pode ser feita na lista impressa.")
+    with st.expander("Detalhes técnicos (para o responsável pelo app)"):
+        st.markdown(
+            f"""
+`httpx.ConnectError` — o host do Supabase não resolveu em DNS.
+URL configurada: `{_url_mascarada()}`
+
+**O que verificar, nesta ordem:**
+
+1. **Projeto pausado no Supabase.** No plano gratuito o projeto hiberna após dias sem uso
+   e o subdomínio deixa de existir. Basta restaurar pelo painel.
+2. **URL do projeto.** Deve ser exatamente a de *Project Settings → API → Project URL*,
+   no formato `https://<ref>.supabase.co` — sem `/rest/v1` no fim.
+3. Depois de corrigir os Secrets, use **Reboot app** no painel do Streamlit.
+            """
+        )
+    st.stop()
+except APIError as erro:
+    st.error("🗄️ O app está fora do ar no momento — o banco recusou a consulta.")
+    with st.expander("Detalhes técnicos (para o responsável pelo app)"):
+        st.markdown(
+            f"""
+Mensagem do banco: `{erro.message}`
+
+Confira se a tabela `chamada_ativa` existe e se a chave usada tem permissão de
+leitura (políticas de RLS).
+            """
+        )
+    st.stop()
+except Exception as erro:
+    st.error(f"Falha inesperada ao conectar ao Supabase: {erro}")
     st.stop()
 
 st.title("📋 Registro de Presença - CCM")
@@ -79,8 +170,13 @@ if menu == "Área do Aluno":
                                         "modulo_nome": dados_modulo["nome"], "professor": dados_modulo["professor"]
                                     }).execute()
                                     st.success(f"✅ Registrado: {primeiro_nome}!")
-                                except Exception:
-                                    st.warning("Já registrado!")
+                                except APIError as erro:
+                                    if duplicado(erro):
+                                        st.warning("Já registrado!")
+                                    else:
+                                        st.error(f"Não foi possível registrar: {erro.message}")
+                                except ERROS_CONEXAO:
+                                    avisar_conexao("registrar a presença")
                 else:
                     st.info("Nenhum aluno com esta inicial.")
             else:
@@ -99,8 +195,13 @@ if menu == "Área do Aluno":
                             }).execute()
                             st.success(f"✅ Sucesso! Presença registrada para {irmao_selecionado}.")
                             st.balloons()
-                        except Exception:
-                            st.warning("Você já registrou sua presença hoje!")
+                        except APIError as erro:
+                            if duplicado(erro):
+                                st.warning("Você já registrou sua presença hoje!")
+                            else:
+                                st.error(f"Não foi possível registrar: {erro.message}")
+                        except ERROS_CONEXAO:
+                            avisar_conexao("registrar a presença")
         else:
             st.warning("Não existem alunos matriculados neste módulo.")
     else:
@@ -113,8 +214,12 @@ elif menu == "Painel do Instrutor":
 
     if not st.session_state.instrutor_autenticado:
         senha_digitada = st.text_input("Digite a senha de acesso do Instrutor:", type="password")
-        senha_correta = st.secrets["credentials"]["senha_instructor" if "senha_instructor" in st.secrets["credentials"] else "senha_instrutor"]
-        if senha_digitada == senha_correta:
+        credenciais = st.secrets.get("credentials", {})
+        senha_correta = credenciais.get("senha_instrutor") or credenciais.get("senha_instructor")
+        if not senha_correta:
+            st.error("⚙️ Senha do instrutor não configurada nos Secrets (`[credentials] senha_instrutor`).")
+            st.stop()
+        if senha_digitada and hmac.compare_digest(senha_digitada, str(senha_correta)):
             st.session_state.instrutor_autenticado = True
             st.rerun()
         elif senha_digitada != "":
@@ -357,17 +462,27 @@ elif menu == "Painel do Instrutor":
                             client.table("modulos").insert({"ano": int(ano_mod), "numero": code_mod.strip().upper(), "nome": nome_mod.strip(), "professor": prof_mod.strip()}).execute()
                             st.success("Módulo cadastrado!")
                             st.rerun()
-                        except Exception:
-                            st.error("Erro ou código duplicado.")
+                        except APIError as erro:
+                            if duplicado(erro):
+                                st.error("Já existe um módulo com este código.")
+                            else:
+                                st.error(f"Não foi possível cadastrar: {erro.message}")
+                        except ERROS_CONEXAO:
+                            avisar_conexao("cadastrar o módulo")
 
         with tab4:
             st.subheader("1. Base Geral: Cadastro Permanente de Alunos")
             nome_novo = st.text_input("Nome Completo")
             if st.button("Salvar Cadastro na Base"):
                 if nome_novo:
-                    client.table("alunos").insert({"nome": nome_novo.strip()}).execute()
-                    st.success("Aluno adicionado permanente à base!")
-                    st.rerun()
+                    try:
+                        client.table("alunos").insert({"nome": nome_novo.strip()}).execute()
+                        st.success("Aluno adicionado permanente à base!")
+                        st.rerun()
+                    except APIError as erro:
+                        st.error(f"Não foi possível cadastrar: {erro.message}")
+                    except ERROS_CONEXAO:
+                        avisar_conexao("cadastrar o aluno")
             
             st.write("---")
             st.subheader("2. Efetivar Nova Matrícula em um Módulo")
@@ -384,8 +499,13 @@ elif menu == "Painel do Instrutor":
                         client.table("matriculas").insert({"aluno_id": int(dict_todos_alunos[aluno_para_matricular]), "modulo_id": int(id_mod_mat)}).execute()
                         st.success("Matrícula vinculada com sucesso!")
                         st.rerun()
-                    except Exception:
-                        st.warning("Aluno já matriculado neste módulo.")
+                    except APIError as erro:
+                        if duplicado(erro):
+                            st.warning("Aluno já matriculado neste módulo.")
+                        else:
+                            st.error(f"Não foi possível matricular: {erro.message}")
+                    except ERROS_CONEXAO:
+                        avisar_conexao("efetivar a matrícula")
             
             st.write("---")
             st.subheader("3. Verificar Alunos Matriculados por Módulo")
