@@ -183,7 +183,11 @@ if menu == "Área do Aluno":
         res_matriculados = client.table("matriculas").select("id, aluno_id, alunos(id, nome)").eq("modulo_id", id_modulo_ativo).execute()
         
         if res_matriculados.data:
-            lista_alunos = [{"id": item["alunos"]["id"], "nome": item["alunos"]["nome"]} for item in res_matriculados.data if item["alunos"]]
+            lista_alunos = [
+                {"id": item["alunos"]["id"], "nome": normalizar(item["alunos"]["nome"])}
+                for item in res_matriculados.data
+                if item["alunos"] and normalizar(item["alunos"].get("nome", ""))
+            ]
             lista_alunos = sorted(lista_alunos, key=lambda k: k['nome'])
             
             if modo_ux == "Botões com Iniciais (A-Z)":
@@ -375,14 +379,23 @@ elif menu == "Painel do Instrutor":
                 
                 # 1. Busca a lista oficial de TODOS os alunos matriculados nesta matéria
                 res_total_mat = client.table("matriculas").select("alunos(nome)").eq("modulo_id", id_modulo_sel).execute()
-                lista_todos_matriculados = sorted([m["alunos"]["nome"] for m in res_total_mat.data if m["alunos"]]) if res_total_mat.data else []
-                total_matriculados = len(lista_todos_matriculados)
-                if total_matriculados == 0: total_matriculados = 1
-                
+                nomes_matriculados = {
+                    m["alunos"]["nome"] for m in (res_total_mat.data or []) if m["alunos"]
+                }
+
                 # 2. Busca o histórico de presenças registradas
                 res_relatorio = client.table("presenca").select("data, status, alunos(nome)").eq(
                     "modulo_numero", codigo_mod_sel
                 ).eq("ano", modulo_objeto["ano"]).execute()
+
+                # Quem tem presença mas perdeu a matrícula continua no diário: sem isso,
+                # o encontro dele viraria uma coluna em que a turma inteira consta ausente.
+                nomes_com_presenca = {
+                    item["alunos"]["nome"] for item in (res_relatorio.data or []) if item["alunos"]
+                }
+                desvinculados = sorted(nomes_com_presenca - nomes_matriculados)
+                lista_todos_matriculados = sorted(nomes_matriculados | nomes_com_presenca)
+                total_matriculados = len(lista_todos_matriculados) or 1
                 
                 if res_relatorio.data and lista_todos_matriculados:
                     # Encontra todas as datas únicas que já tiveram chamada nessa matéria
@@ -441,6 +454,12 @@ elif menu == "Painel do Instrutor":
                             else:
                                 st.success("🙌 Glória a Deus! 100% de presença no último encontro!")
                     
+                    if desvinculados:
+                        st.caption(
+                            f"ℹ️ {len(desvinculados)} pessoa(s) com presença registrada não constam mais "
+                            f"como matriculadas neste módulo: {', '.join(desvinculados)}."
+                        )
+
                     st.markdown("### Grade de Frequência Consolidada")
                     st.dataframe(df_visual, width='stretch')
                     
