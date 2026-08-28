@@ -5,7 +5,9 @@ from supabase import create_client, Client
 import io
 import base64
 import hmac
+import difflib
 import httpx
+from collections import Counter
 import matplotlib.pyplot as plt
 from postgrest.exceptions import APIError
 
@@ -49,6 +51,27 @@ def avisar_conexao(contexto: str = "") -> None:
         f"🔌 Sem conexão com o banco de dados{(' ao ' + contexto) if contexto else ''}. "
         "Tente novamente em instantes; se persistir, avise o responsável pelo app."
     )
+
+
+def normalizar(texto: str) -> str:
+    """Colapsa espaços duplicados e sobras nas pontas."""
+    return " ".join(str(texto).split())
+
+
+def cadastrar_aluno(nome: str) -> None:
+    try:
+        client.table("alunos").insert({"nome": nome}).execute()
+        st.session_state.pop("aluno_pendente", None)
+        st.session_state.pop("aluno_parecidos", None)
+        st.session_state["flash_alunos"] = f"✅ {nome} adicionado à base."
+        st.rerun()
+    except APIError as erro:
+        if duplicado(erro):
+            st.error("Já existe um cadastro com este nome.")
+        else:
+            st.error(f"Não foi possível cadastrar: {erro.message}")
+    except ERROS_CONEXAO:
+        avisar_conexao("cadastrar o aluno")
 
 
 @st.cache_resource(show_spinner="Conectando ao banco de dados...")
@@ -471,29 +494,209 @@ elif menu == "Painel do Instrutor":
                             avisar_conexao("cadastrar o módulo")
 
         with tab4:
+            try:
+                alunos_base = client.table("alunos").select("id, nome").order("nome").execute().data or []
+                vinculos = client.table("matriculas").select("id, aluno_id, modulo_id").execute().data or []
+                registros_presenca = client.table("presenca").select("aluno_id").execute().data or []
+            except APIError as erro:
+                st.error(f"Não foi possível carregar a base de alunos: {erro.message}")
+                st.stop()
+            except ERROS_CONEXAO:
+                avisar_conexao("carregar a base de alunos")
+                st.stop()
+
+            qtd_matriculas = Counter(v["aluno_id"] for v in vinculos)
+            qtd_presencas = Counter(r["aluno_id"] for r in registros_presenca)
+            nomes_cadastrados = {normalizar(a["nome"]).lower(): a["nome"] for a in alunos_base}
+            mapa_modulos = {m["id"]: f"Mód {m['numero']} - {m['nome']}" for m in (res_modulos.data or [])}
+
+            if st.session_state.get("flash_alunos"):
+                st.success(st.session_state.pop("flash_alunos"))
+
             st.subheader("1. Base Geral: Cadastro Permanente de Alunos")
-            nome_novo = st.text_input("Nome Completo")
-            if st.button("Salvar Cadastro na Base"):
-                if nome_novo:
-                    try:
-                        client.table("alunos").insert({"nome": nome_novo.strip()}).execute()
-                        st.success("Aluno adicionado permanente à base!")
-                        st.rerun()
-                    except APIError as erro:
-                        st.error(f"Não foi possível cadastrar: {erro.message}")
-                    except ERROS_CONEXAO:
-                        avisar_conexao("cadastrar o aluno")
-            
+            st.caption(f"{len(alunos_base)} pessoa(s) na base do CCM.")
+
+            aba_consultar, aba_cadastrar, aba_manter = st.tabs(
+                ["📋 Consultar", "➕ Cadastrar", "✏️ Corrigir / Remover"]
+            )
+
+            with aba_consultar:
+                if not alunos_base:
+                    st.info("A base ainda está vazia. Use a aba **Cadastrar** para começar.")
+                else:
+                    termo = normalizar(st.text_input(
+                        "🔎 Buscar por nome",
+                        placeholder="Digite parte do nome...",
+                        key="busca_base_alunos",
+                    )).lower()
+                    filtrados = [a for a in alunos_base if termo in a["nome"].lower()] if termo else alunos_base
+
+                    if filtrados:
+                        df_base_alunos = pd.DataFrame([
+                            {
+                                "Aluno": a["nome"],
+                                "Matrículas": qtd_matriculas.get(a["id"], 0),
+                                "Presenças": qtd_presencas.get(a["id"], 0),
+                            }
+                            for a in filtrados
+                        ])
+                        df_base_alunos.index = range(1, len(df_base_alunos) + 1)
+                        st.dataframe(df_base_alunos, width='stretch', height=400)
+                        st.caption(f"Exibindo {len(filtrados)} de {len(alunos_base)} cadastros.")
+
+                        st.download_button(
+                            "📥 Baixar base em CSV",
+                            data=df_base_alunos.to_csv(index=False).encode("utf-8-sig"),
+                            file_name="base_alunos_ccm.csv",
+                            mime="text/csv",
+                            key="download_base_alunos",
+                        )
+
+                        sem_vinculo = sorted(
+                            a["nome"] for a in alunos_base if qtd_matriculas.get(a["id"], 0) == 0
+                        )
+                        if sem_vinculo:
+                            with st.expander(f"⚠️ {len(sem_vinculo)} cadastro(s) sem nenhuma matrícula"):
+                                st.caption(
+                                    "Estas pessoas estão na base, mas não aparecem em nenhuma lista de "
+                                    "chamada — falta matriculá-las em um módulo (seção 2)."
+                                )
+                                st.write(" · ".join(sem_vinculo))
+                    else:
+                        st.info("Nenhum cadastro encontrado com esse termo.")
+
+            with aba_cadastrar:
+                with st.form("form_novo_aluno", clear_on_submit=True):
+                    nome_digitado = st.text_input("Nome Completo")
+                    salvar_aluno = st.form_submit_button("Salvar Cadastro na Base", type="primary")
+
+                if salvar_aluno:
+                    nome_limpo = normalizar(nome_digitado)
+                    if not nome_limpo:
+                        st.warning("Informe o nome antes de salvar.")
+                    elif nome_limpo.lower() in nomes_cadastrados:
+                        st.error(f"'{nome_limpo}' já está cadastrado na base.")
+                    else:
+                        parecidos = difflib.get_close_matches(
+                            nome_limpo.lower(), list(nomes_cadastrados.keys()), n=3, cutoff=0.8
+                        )
+                        if parecidos:
+                            st.session_state["aluno_pendente"] = nome_limpo
+                            st.session_state["aluno_parecidos"] = [nomes_cadastrados[p] for p in parecidos]
+                        else:
+                            cadastrar_aluno(nome_limpo)
+
+                nome_pendente = st.session_state.get("aluno_pendente")
+                if nome_pendente:
+                    with st.container(border=True):
+                        st.warning(
+                            "Já existe cadastro parecido: "
+                            + " · ".join(st.session_state.get("aluno_parecidos", []))
+                        )
+                        st.markdown(f"Confirme se **{nome_pendente}** é mesmo outra pessoa.")
+                        col_sim, col_nao = st.columns(2)
+                        if col_sim.button("Cadastrar mesmo assim", type="primary", width='stretch'):
+                            cadastrar_aluno(nome_pendente)
+                        if col_nao.button("Cancelar", width='stretch'):
+                            st.session_state.pop("aluno_pendente", None)
+                            st.session_state.pop("aluno_parecidos", None)
+                            st.rerun()
+
+            with aba_manter:
+                if not alunos_base:
+                    st.info("Nenhum cadastro para corrigir ainda.")
+                else:
+                    escolhido = st.selectbox(
+                        "Selecione o cadastro",
+                        options=[a["nome"] for a in alunos_base],
+                        index=None,
+                        placeholder="Digite para buscar...",
+                        key="sel_manter_aluno",
+                    )
+
+                    if escolhido:
+                        aluno_alvo = next(a for a in alunos_base if a["nome"] == escolhido)
+                        n_matriculas = qtd_matriculas.get(aluno_alvo["id"], 0)
+                        n_presencas = qtd_presencas.get(aluno_alvo["id"], 0)
+                        modulos_do_aluno = sorted(
+                            mapa_modulos.get(v["modulo_id"], "Módulo removido")
+                            for v in vinculos if v["aluno_id"] == aluno_alvo["id"]
+                        )
+
+                        with st.container(border=True):
+                            st.markdown(f"**{aluno_alvo['nome']}**")
+                            st.caption(f"{n_matriculas} matrícula(s) · {n_presencas} presença(s) no histórico")
+                            if modulos_do_aluno:
+                                st.caption("Matriculado em: " + " · ".join(modulos_do_aluno))
+
+                        st.markdown("**Corrigir nome**")
+                        nome_corrigido = st.text_input(
+                            "Nome corrigido", value=aluno_alvo["nome"], key=f"txt_corrige_nome_{aluno_alvo['id']}"
+                        )
+                        if st.button("Salvar correção", key=f"btn_corrige_nome_{aluno_alvo['id']}"):
+                            novo = normalizar(nome_corrigido)
+                            if not novo:
+                                st.warning("O nome não pode ficar vazio.")
+                            elif novo == aluno_alvo["nome"]:
+                                st.info("Nada foi alterado.")
+                            elif novo.lower() in nomes_cadastrados:
+                                st.error("Já existe outro cadastro com esse nome.")
+                            else:
+                                try:
+                                    client.table("alunos").update({"nome": novo}).eq(
+                                        "id", int(aluno_alvo["id"])
+                                    ).execute()
+                                    st.session_state["flash_alunos"] = f"✅ Nome corrigido para {novo}."
+                                    st.rerun()
+                                except APIError as erro:
+                                    st.error(f"Não foi possível corrigir: {erro.message}")
+                                except ERROS_CONEXAO:
+                                    avisar_conexao("corrigir o nome")
+                        st.caption(
+                            "A correção reflete automaticamente nas listas de chamada e nos relatórios: "
+                            "o histórico é vinculado ao cadastro, não ao texto do nome."
+                        )
+
+                        st.write("---")
+                        st.markdown("**Remover da base**")
+                        if n_presencas > 0:
+                            st.info(
+                                f"Remoção bloqueada: há {n_presencas} presença(s) registrada(s) para esta "
+                                "pessoa. Excluir o cadastro deixaria buracos no diário de classe. Se ela saiu "
+                                "do curso, remova apenas a matrícula do módulo (seção 3)."
+                            )
+                        elif n_matriculas > 0:
+                            st.warning(
+                                f"Remoção bloqueada: há {n_matriculas} matrícula(s) ativa(s). Desvincule na "
+                                "seção 3 antes de excluir da base."
+                            )
+                        else:
+                            confirmado = st.checkbox(
+                                f"Confirmo a exclusão permanente de {aluno_alvo['nome']}",
+                                key=f"chk_exclui_aluno_{aluno_alvo['id']}",
+                            )
+                            if st.button(
+                                "🗑️ Excluir cadastro", type="primary",
+                                disabled=not confirmado, key=f"btn_exclui_aluno_{aluno_alvo['id']}",
+                            ):
+                                try:
+                                    client.table("alunos").delete().eq("id", int(aluno_alvo["id"])).execute()
+                                    st.session_state["flash_alunos"] = f"🗑️ {aluno_alvo['nome']} removido da base."
+                                    st.rerun()
+                                except APIError as erro:
+                                    st.error(f"Não foi possível remover: {erro.message}")
+                                except ERROS_CONEXAO:
+                                    avisar_conexao("remover o cadastro")
+
             st.write("---")
             st.subheader("2. Efetivar Nova Matrícula em um Módulo")
-            res_todos_alunos = client.table("alunos").select("id, nome").order("nome").execute()
-            if res_todos_alunos.data and res_modulos.data:
-                dict_todos_alunos = {aluno['nome']: aluno['id'] for aluno in res_todos_alunos.data}
+            if alunos_base and res_modulos.data:
+                dict_todos_alunos = {aluno['nome']: aluno['id'] for aluno in alunos_base}
                 aluno_para_matricular = st.selectbox("Selecione a pessoa:", options=list(dict_todos_alunos.keys()))
                 dict_modulos_mat = {f"Mód {m['numero']} - {m['nome']}": m['id'] for m in res_modulos.data}
                 modulo_para_matricular_texto = st.selectbox("Selecione o Módulo de Destino:", options=list(dict_modulos_mat.keys()))
                 id_mod_mat = dict_modulos_mat[modulo_para_matricular_texto]
-                
+
                 if st.button("Efetivar Matrícula no Módulo"):
                     try:
                         client.table("matriculas").insert({"aluno_id": int(dict_todos_alunos[aluno_para_matricular]), "modulo_id": int(id_mod_mat)}).execute()
@@ -506,26 +709,64 @@ elif menu == "Painel do Instrutor":
                             st.error(f"Não foi possível matricular: {erro.message}")
                     except ERROS_CONEXAO:
                         avisar_conexao("efetivar a matrícula")
-            
+            else:
+                st.info("Cadastre alunos e módulos antes de efetivar matrículas.")
+
             st.write("---")
             st.subheader("3. Verificar Alunos Matriculados por Módulo")
             if res_modulos.data:
                 dict_ver_matriculas = {f"Mód {m['numero']} - {m['nome']}": m['id'] for m in res_modulos.data}
                 mod_escolhido_ver = st.selectbox("Selecione o Módulo para ver os alunos ativos:", options=list(dict_ver_matriculas.keys()), key="sb_ver_mat")
                 id_mod_ver = dict_ver_matriculas[mod_escolhido_ver]
-                
-                res_lista_mat_filtrada = client.table("matriculas").select("alunos(nome)").eq("modulo_id", id_mod_ver).execute()
-                
+
+                try:
+                    res_lista_mat_filtrada = client.table("matriculas").select("id, alunos(id, nome)").eq("modulo_id", id_mod_ver).execute()
+                except ERROS_CONEXAO:
+                    avisar_conexao("listar as matrículas")
+                    st.stop()
+
                 if res_lista_mat_filtrada.data:
-                    alunos_encontrados = [{"Nome do Aluno Ativo": m["alunos"]["nome"]} for m in res_lista_mat_filtrada.data if m["alunos"]]
-                    df_alunos_mat = pd.DataFrame(alunos_encontrados).sort_values(by="Nome do Aluno Ativo").reset_index(drop=True)
-                    df_alunos_mat.index += 1
-                    
+                    matriculados = sorted(
+                        (
+                            {"id_matricula": m["id"], "nome": m["alunos"]["nome"]}
+                            for m in res_lista_mat_filtrada.data if m["alunos"]
+                        ),
+                        key=lambda x: x["nome"],
+                    )
+                    df_alunos_mat = pd.DataFrame([{"Nome do Aluno Ativo": m["nome"]} for m in matriculados])
+                    df_alunos_mat.index = range(1, len(df_alunos_mat) + 1)
+
                     st.write("")
                     with st.container(border=True):
                         st.markdown(f"📊 **Total de alunos matriculados nesta matéria:** `{len(df_alunos_mat)}`")
                         st.write("")
                         st.dataframe(df_alunos_mat, width='stretch', height=400)
+
+                    with st.expander("➖ Remover matrícula deste módulo"):
+                        mapa_matriculas = {m["nome"]: m["id_matricula"] for m in matriculados}
+                        alvo_desvincular = st.selectbox(
+                            "Aluno a desvincular",
+                            options=list(mapa_matriculas.keys()),
+                            index=None,
+                            placeholder="Selecione...",
+                            key="sel_remove_matricula",
+                        )
+                        if alvo_desvincular:
+                            st.caption(
+                                "As presenças já registradas continuam no histórico. O aluno apenas deixa "
+                                "de constar na lista de chamada e no relatório deste módulo."
+                            )
+                            if st.button("Remover matrícula", key="btn_remove_matricula"):
+                                try:
+                                    client.table("matriculas").delete().eq(
+                                        "id", int(mapa_matriculas[alvo_desvincular])
+                                    ).execute()
+                                    st.session_state["flash_alunos"] = f"➖ {alvo_desvincular} desvinculado do módulo."
+                                    st.rerun()
+                                except APIError as erro:
+                                    st.error(f"Não foi possível remover a matrícula: {erro.message}")
+                                except ERROS_CONEXAO:
+                                    avisar_conexao("remover a matrícula")
                 else:
                     st.info("Nenhum aluno matriculado especificamente neste módulo ainda.")
             else:
